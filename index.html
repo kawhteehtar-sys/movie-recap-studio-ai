@@ -84,8 +84,6 @@ a{color:#83d9ed}
 <div class="row"><input id="apiKey" type="password" placeholder="AIza..." autocomplete="off"><button class="secondary" id="toggleKey" type="button">ပြ</button></div>
 <div class="row" style="margin-top:8px"><button class="secondary small" id="saveKey" type="button">Key သိမ်းမယ်</button><button class="secondary small" id="clearKey" type="button">ဖျက်မယ်</button><a class="muted" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">API Key ရယူရန် ↗</a></div>
 <p class="muted">Key ကို ဒီ Browser ထဲမှာသာ သိမ်းပါ။ HTML ကို အများသုံးတင်မည်ဆိုလျှင် ကိုယ်ပိုင် Key မထည့်ထားပါနှင့်။</p>
-<button class="secondary small" id="checkKey" type="button">Gemini Key စစ်မယ်</button>
-<div id="keyStatus" class="status"></div>
 </section>
 
 <section class="card">
@@ -140,6 +138,7 @@ a{color:#83d9ed}
 "use strict";
 
 let authToken=sessionStorage.getItem("mrs_token")||"", currentAccount=null;
+let mp4ExpiryTimer=null, mp4CountdownTimer=null, mp4ExpiresAt=0;
 function authHeaders(extra={}){return {...extra, ...(authToken?{Authorization:"Bearer "+authToken}:{})};}
 async function apiJson(path,opts={}) {
  const r=await fetch(BACKEND+path,{...opts,headers:authHeaders(opts.headers||{})});
@@ -157,7 +156,6 @@ async function refreshAccount(){
   const cfg=await apiJson("/api/config");
   $("waveInfo").textContent=cfg.wavepay.phone?`WavePay: ${cfg.wavepay.phone} · ${cfg.wavepay.name||""} · Premium ${cfg.premium_price||"စျေးနှုန်း မသတ်မှတ်ရသေး"} / ${cfg.premium_days} ရက်`:"Admin က WavePay အကောင့်နံပါတ်နဲ့ QR ကို နောက်မှ ထည့်နိုင်ပါတယ်။";
   if(currentAccount.is_admin){$("adminArea").classList.remove("hidden");await loadAdmin();}else{$("adminArea").classList.add("hidden");}
-  await listProjects();
  }catch(e){authToken="";sessionStorage.removeItem("mrs_token");$("accountStatus").textContent=e.message;}
 }
 $("registerBtn").onclick=async()=>{try{await apiJson("/api/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:$("authEmail").value,display_name:$("authName").value,password:$("authPassword").value})});$("accountStatus").textContent="အကောင့်ဖွင့်ပြီးပါပြီ။ Login ဝင်ပါ။";}catch(e){$("accountStatus").textContent=e.message;}};
@@ -186,7 +184,7 @@ $("saveWaveSettings").onclick=async()=>{try{await apiJson("/api/admin/settings/w
 
 const $=id=>document.getElementById(id);
 const API="https://generativelanguage.googleapis.com/v1beta";
-const BACKEND=(window.MRS_BACKEND_URL||location.origin).replace(/\/$/,"");
+const BACKEND=window.MRS_BACKEND_URL||"http://127.0.0.1:8000";
 let mode="youtube",scriptText="",ttsBlob=null,videoUrl="",editFile=null,audioFile=null;
 let blurRegions=[],selectedBlur=-1,subtitles=[],videoDuration=0,mp3Url="",mp4Url="";
 
@@ -194,10 +192,10 @@ function msg(t,type=""){ $("status").textContent=t;$("status").className="status
 function setStatus(id,t,type=""){const el=$(id);el.textContent=t;el.className="status "+type;}
 function setMode(m){mode=m;$("ytTab").classList.toggle("active",m==="youtube");$("fileTab").classList.toggle("active",m==="file");$("youtubePanel").classList.toggle("hidden",m!=="youtube");$("filePanel").classList.toggle("hidden",m!=="file");}
 function revokeUrl(url){if(url)URL.revokeObjectURL(url);}
-$("apiKey").value=sessionStorage.getItem("mrs_gemini_key")||"";
+$("apiKey").value="";
 $("toggleKey").onclick=()=>$("apiKey").type=$("apiKey").type==="password"?"text":"password";
 $("saveKey").onclick=()=>{const k=$("apiKey").value.trim();if(!k)return msg("API Key ထည့်ပါ","error");sessionStorage.setItem("mrs_gemini_key",k);msg("ဒီ Session အတွင်းသာ Key သိမ်းထားပါပြီ","ok");};
-$("clearKey").onclick=()=>{sessionStorage.removeItem("mrs_gemini_key");$("apiKey").value=sessionStorage.getItem("mrs_gemini_key")||"";msg("Key ဖျက်ပြီးပါပြီ");};
+$("clearKey").onclick=()=>{sessionStorage.removeItem("mrs_gemini_key");$("apiKey").value="";msg("Key ဖျက်ပြီးပါပြီ");};
 $("ytTab").onclick=()=>setMode("youtube");$("fileTab").onclick=()=>setMode("file");
 
 function extractText(d){
@@ -368,14 +366,40 @@ $("exportMp4").onclick=async()=>{
   const r=await fetch(BACKEND+"/api/render-mp4",{method:"POST",headers:authHeaders(),body:fd});
   if(!r.ok){let detail=await r.text();throw Error(detail||`HTTP ${r.status}`);}
   const blob=await r.blob();if(!blob.size)throw Error("Backend က MP4 အလွတ်ပြန်ပေးပါတယ်");
+  // Keep the finished MP4 available in this browser for 10 minutes only.
+  if(mp4ExpiryTimer)clearTimeout(mp4ExpiryTimer);
+  if(mp4CountdownTimer)clearInterval(mp4CountdownTimer);
   revokeUrl(mp4Url);mp4Url=URL.createObjectURL(blob);
-  const a=$("downloadMp4");a.href=mp4Url;a.classList.remove("hidden");a.textContent="⬇ MP4 ဖိုင်ဒေါင်းလုဒ်လုပ်ရန်";a.click();
-  setStatus("exportStatus","MP4 ပြီးပါပြီ။","ok");
+  const a=$("downloadMp4");a.href=mp4Url;a.classList.remove("hidden");
+  a.textContent="⬇ MP4 ဖိုင်ဒေါင်းလုဒ်လုပ်ရန် (၁၀ မိနစ်အတွင်း)";
+  a.click();
+  // The backend's temporary render folder (including its uploaded source video)
+  // is deleted after the response is sent. Also release the browser's source file.
+  editFile=null;
+  ["videoFile","editVideo"].forEach(id=>{const el=$(id);if(el)el.value="";});
+  const preview=$("preview");if(preview){preview.pause();preview.removeAttribute("src");preview.load();}
+  revokeUrl(videoUrl);videoUrl="";
+  if($("previewWrap"))$("previewWrap").classList.add("hidden");
+  // Release the generated MP3 from the editor too; the MP4 already contains its audio.
+  audioFile=null;ttsBlob=null;revokeUrl(mp3Url);mp3Url="";
+  const audioEl=$("ttsAudio");if(audioEl){audioEl.pause();audioEl.removeAttribute("src");audioEl.load();audioEl.classList.add("hidden");}
+  mp4ExpiresAt=Date.now()+10*60*1000;
+  const updateCountdown=()=>{
+    const left=Math.max(0,mp4ExpiresAt-Date.now());
+    const mins=Math.floor(left/60000),secs=Math.floor((left%60000)/1000);
+    if(left>0)setStatus("exportStatus",`MP4 အဆင်သင့်ပါပြီ။ Download လုပ်ရန် ${mins}:${String(secs).padStart(2,"0")} မိနစ် ကျန်ပါသည်။` ,"ok");
+  };
+  updateCountdown();mp4CountdownTimer=setInterval(updateCountdown,1000);
+  mp4ExpiryTimer=setTimeout(()=>{
+    if(mp4CountdownTimer)clearInterval(mp4CountdownTimer);
+    revokeUrl(mp4Url);mp4Url="";a.removeAttribute("href");a.classList.add("hidden");
+    setStatus("exportStatus","၁၀ မိနစ်ပြည့်သွားပါပြီ။ MP4 ဖိုင်ကို ဒီစာမျက်နှာမှ ဖျက်ပြီးပါပြီ။ ပြန်ရယူရန် Export အသစ်လုပ်ပါ။","error");
+  },10*60*1000);
  }catch(e){setStatus("exportStatus","Export မအောင်မြင်ပါ: "+e.message,"error");}
  finally{$("exportMp4").disabled=false;}
 };
 refreshAccount();
-window.addEventListener("beforeunload",()=>{revokeUrl(videoUrl);revokeUrl(mp3Url);revokeUrl(mp4Url);});
+window.addEventListener("beforeunload",()=>{if(mp4ExpiryTimer)clearTimeout(mp4ExpiryTimer);if(mp4CountdownTimer)clearInterval(mp4CountdownTimer);revokeUrl(videoUrl);revokeUrl(mp3Url);revokeUrl(mp4Url);});
 </script>
 </body>
 </html>
