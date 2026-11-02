@@ -26,6 +26,9 @@ MAX_VIDEO_BYTES = 500 * 1024 * 1024
 MAX_AUDIO_BYTES = 100 * 1024 * 1024
 
 app = FastAPI(title=APP_NAME, version="2.1.0")
+@app.get("/")
+async def home():
+    return FileResponse("index.html", media_type="text/html")
 origins = [x.strip() for x in os.getenv("CORS_ORIGINS", "*").split(",") if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=origins or ["*"],
                    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
